@@ -2,14 +2,22 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log/slog"
 	"net"
 	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
+	"time"
 
 	"my-redis/internal/server"
 )
+
+// shutdownGrace bounds how long a signalled server waits for connected clients
+// to go away before exiting anyway.
+const shutdownGrace = 5 * time.Second
 
 func main() {
 	var (
@@ -33,8 +41,25 @@ func main() {
 	}
 	log.Info("ready to accept connections", "addr", srv.Addr())
 
-	if err := srv.Serve(); err != nil {
+	signalled, stopListening := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopListening()
+
+	served := make(chan error, 1)
+	go func() { served <- srv.Serve() }()
+
+	select {
+	case err := <-served:
 		log.Error("server stopped", "error", err)
 		os.Exit(1)
+	case <-signalled.Done():
+		log.Info("signal received, shutting down", "grace", shutdownGrace)
 	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Warn("shut down with clients still connected", "error", err)
+	}
+	<-served // Serve returns once the listener is closed.
+	log.Info("stopped")
 }

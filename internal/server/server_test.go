@@ -1,11 +1,14 @@
 package server_test
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,7 +27,11 @@ func newTestServer(t *testing.T) string {
 	done := make(chan error, 1)
 	go func() { done <- srv.Serve() }()
 	t.Cleanup(func() {
-		srv.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			t.Errorf("Shutdown: %v", err)
+		}
 		if err := <-done; err != nil {
 			t.Errorf("Serve: %v", err)
 		}
@@ -144,4 +151,64 @@ func TestProtocolErrorClosesConnection(t *testing.T) {
 	c.sendRaw("*1\r\n+PING\r\n")
 	c.expect("-ERR Protocol error: ")
 	c.expectClosed()
+}
+
+func TestConcurrentClients(t *testing.T) {
+	addr := newTestServer(t)
+
+	// A client that has connected but sent nothing must not stop others from
+	// being served.
+	idle := dial(t, addr)
+	defer idle.conn.Close()
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c := dial(t, addr)
+			for range 5 {
+				c.send("PING")
+				c.expect("+PONG\r\n")
+			}
+			c.conn.Close()
+		}()
+	}
+	wg.Wait()
+}
+
+func TestShutdownWaitsForConnectedClients(t *testing.T) {
+	log := slog.New(slog.DiscardHandler)
+	srv, err := server.Listen("127.0.0.1:0", log)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	served := make(chan error, 1)
+	go func() { served <- srv.Serve() }()
+
+	c := dial(t, srv.Addr())
+	c.send("PING")
+	c.expect("+PONG\r\n")
+
+	// With a client still connected, Shutdown reports that it gave up waiting.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := srv.Shutdown(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Shutdown with a client connected: error = %v, want DeadlineExceeded", err)
+	}
+	if err := <-served; err != nil {
+		t.Errorf("Serve: %v", err)
+	}
+
+	// The listener is closed, so no new client can connect.
+	if conn, err := net.Dial("tcp", srv.Addr()); err == nil {
+		conn.Close()
+		t.Error("connected to the server after shutdown, want refusal")
+	}
+
+	// Once that client goes away, Shutdown returns cleanly.
+	c.conn.Close()
+	if err := srv.Shutdown(context.Background()); err != nil {
+		t.Errorf("Shutdown after the client left: %v", err)
+	}
 }

@@ -3,18 +3,23 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log/slog"
 	"net"
+	"sync"
 
 	"my-redis/internal/resp"
 )
 
-// Server accepts connections on a listener and serves commands on them.
+// Server accepts connections on a listener and serves commands on them. Each
+// client is served by its own goroutine, so a slow client cannot block others.
 type Server struct {
 	ln  net.Listener
 	log *slog.Logger
+
+	conns sync.WaitGroup // in-flight connections, awaited by Shutdown
 }
 
 // Listen binds a TCP listener to addr and returns a Server ready to Serve.
@@ -33,11 +38,35 @@ func Listen(addr string, log *slog.Logger) (*Server, error) {
 // Addr returns the address the server is listening on.
 func (s *Server) Addr() string { return s.ln.Addr().String() }
 
-// Close stops the server from accepting new connections.
+// Close stops the server from accepting new connections, causing Serve to
+// return. Connections already being served are left to finish; use Shutdown to
+// wait for them.
 func (s *Server) Close() error { return s.ln.Close() }
 
-// Serve accepts connections and serves each one in turn. It runs until the
-// listener is closed, and returns nil in that case.
+// Shutdown stops accepting new connections and waits for the clients already
+// connected to disconnect, or for ctx to be done, whichever happens first. It
+// returns ctx.Err() if clients were still connected when the wait was cut short.
+func (s *Server) Shutdown(ctx context.Context) error {
+	// net.ErrClosed just means the listener is already closed, which makes
+	// Shutdown safe to call more than once.
+	if err := s.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		return err
+	}
+	drained := make(chan struct{})
+	go func() {
+		s.conns.Wait()
+		close(drained)
+	}()
+	select {
+	case <-drained:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Serve accepts connections, handing each to its own goroutine. It runs until
+// the listener is closed, and returns nil in that case.
 func (s *Server) Serve() error {
 	for {
 		conn, err := s.ln.Accept()
@@ -47,7 +76,11 @@ func (s *Server) Serve() error {
 			}
 			return err
 		}
-		s.serveConn(conn)
+		s.conns.Add(1)
+		go func() {
+			defer s.conns.Done()
+			s.serveConn(conn)
+		}()
 	}
 }
 
