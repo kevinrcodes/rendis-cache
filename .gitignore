@@ -1,0 +1,7 @@
+# Build output
+/bin/
+/my-redis
+
+# Go test/coverage artifacts
+*.test
+*.out
