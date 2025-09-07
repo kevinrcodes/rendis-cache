@@ -12,6 +12,7 @@ type handler func(args []string) resp.Value
 
 // commands maps a lowercased command name to its implementation.
 var commands = map[string]handler{
+	"echo": echo,
 	"ping": ping,
 }
 
@@ -37,6 +38,15 @@ func ping(args []string) resp.Value {
 	default:
 		return wrongArgCount(args[0])
 	}
+}
+
+// echo returns its single argument unchanged.
+// https://redis.io/docs/latest/commands/echo/
+func echo(args []string) resp.Value {
+	if len(args) != 2 {
+		return wrongArgCount(args[0])
+	}
+	return resp.BulkString(args[1])
 }
 
 func wrongArgCount(name string) resp.Value {

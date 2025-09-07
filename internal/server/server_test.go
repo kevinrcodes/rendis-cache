@@ -120,6 +120,24 @@ func TestPingWithTooManyArguments(t *testing.T) {
 	c.expect("-ERR wrong number of arguments for 'ping' command\r\n")
 }
 
+func TestEcho(t *testing.T) {
+	c := dial(t, newTestServer(t))
+	c.send("ECHO", "hey")
+	c.expect("$3\r\nhey\r\n")
+}
+
+func TestEchoPreservesBinaryContent(t *testing.T) {
+	c := dial(t, newTestServer(t))
+	c.send("ECHO", "a\r\nb")
+	c.expect("$4\r\na\r\nb\r\n")
+}
+
+func TestEchoWithoutArgument(t *testing.T) {
+	c := dial(t, newTestServer(t))
+	c.send("ECHO")
+	c.expect("-ERR wrong number of arguments for 'echo' command\r\n")
+}
+
 func TestMultipleCommandsOnOneConnection(t *testing.T) {
 	c := dial(t, newTestServer(t))
 	for range 3 {
