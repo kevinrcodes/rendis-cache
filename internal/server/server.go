@@ -11,13 +11,15 @@ import (
 	"sync"
 
 	"my-redis/internal/resp"
+	"my-redis/internal/store"
 )
 
 // Server accepts connections on a listener and serves commands on them. Each
 // client is served by its own goroutine, so a slow client cannot block others.
 type Server struct {
-	ln  net.Listener
-	log *slog.Logger
+	ln    net.Listener
+	log   *slog.Logger
+	store *store.Store
 
 	conns sync.WaitGroup // in-flight connections, awaited by Shutdown
 }
@@ -32,7 +34,7 @@ func Listen(addr string, log *slog.Logger) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Server{ln: ln, log: log}, nil
+	return &Server{ln: ln, log: log, store: store.New()}, nil
 }
 
 // Addr returns the address the server is listening on.
@@ -112,7 +114,7 @@ func (s *Server) serveConn(conn net.Conn) {
 		if len(args) == 0 {
 			continue // an empty command line; nothing to execute
 		}
-		if !writeReply(conn, execute(args), log) {
+		if !writeReply(conn, s.execute(args), log) {
 			return
 		}
 	}

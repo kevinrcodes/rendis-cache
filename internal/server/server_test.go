@@ -138,6 +138,50 @@ func TestEchoWithoutArgument(t *testing.T) {
 	c.expect("-ERR wrong number of arguments for 'echo' command\r\n")
 }
 
+func TestSetThenGet(t *testing.T) {
+	c := dial(t, newTestServer(t))
+	c.send("SET", "foo", "bar")
+	c.expect("+OK\r\n")
+	c.send("GET", "foo")
+	c.expect("$3\r\nbar\r\n")
+}
+
+func TestGetMissingKey(t *testing.T) {
+	c := dial(t, newTestServer(t))
+	c.send("GET", "absent")
+	c.expect("$-1\r\n")
+}
+
+func TestSetOverwrites(t *testing.T) {
+	c := dial(t, newTestServer(t))
+	c.send("SET", "foo", "first")
+	c.expect("+OK\r\n")
+	c.send("SET", "foo", "second")
+	c.expect("+OK\r\n")
+	c.send("GET", "foo")
+	c.expect("$6\r\nsecond\r\n")
+}
+
+func TestKeyspaceIsSharedBetweenClients(t *testing.T) {
+	addr := newTestServer(t)
+
+	writer := dial(t, addr)
+	writer.send("SET", "shared", "value")
+	writer.expect("+OK\r\n")
+
+	reader := dial(t, addr)
+	reader.send("GET", "shared")
+	reader.expect("$5\r\nvalue\r\n")
+}
+
+func TestSetAndGetWrongArgumentCount(t *testing.T) {
+	c := dial(t, newTestServer(t))
+	c.send("SET", "foo")
+	c.expect("-ERR wrong number of arguments for 'set' command\r\n")
+	c.send("GET")
+	c.expect("-ERR wrong number of arguments for 'get' command\r\n")
+}
+
 func TestMultipleCommandsOnOneConnection(t *testing.T) {
 	c := dial(t, newTestServer(t))
 	for range 3 {
