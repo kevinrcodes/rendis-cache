@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -273,4 +274,105 @@ func TestShutdownWaitsForConnectedClients(t *testing.T) {
 	if err := srv.Shutdown(context.Background()); err != nil {
 		t.Errorf("Shutdown after the client left: %v", err)
 	}
+}
+
+func TestSetWithExpiryHidesTheKeyOnceItExpires(t *testing.T) {
+	c := dial(t, newTestServer(t))
+	c.send("SET", "foo", "bar", "PX", "100")
+	c.expect("+OK\r\n")
+
+	c.send("GET", "foo")
+	c.expect("$3\r\nbar\r\n")
+
+	time.Sleep(150 * time.Millisecond)
+	c.send("GET", "foo")
+	c.expect("$-1\r\n")
+}
+
+func TestSetExpiryOptionsAreCaseInsensitive(t *testing.T) {
+	c := dial(t, newTestServer(t))
+	c.send("SET", "foo", "bar", "pX", "100")
+	c.expect("+OK\r\n")
+	c.send("GET", "foo")
+	c.expect("$3\r\nbar\r\n")
+}
+
+func TestSetWithSecondsExpiry(t *testing.T) {
+	c := dial(t, newTestServer(t))
+	c.send("SET", "foo", "bar", "EX", "60")
+	c.expect("+OK\r\n")
+	c.send("GET", "foo")
+	c.expect("$3\r\nbar\r\n")
+}
+
+func TestSetWithAbsoluteExpiryInThePast(t *testing.T) {
+	c := dial(t, newTestServer(t))
+	c.send("SET", "foo", "bar", "EXAT", "1")
+	c.expect("+OK\r\n")
+	c.send("GET", "foo")
+	c.expect("$-1\r\n")
+}
+
+func TestSetWithAbsoluteExpiryInTheFuture(t *testing.T) {
+	c := dial(t, newTestServer(t))
+	future := strconv.FormatInt(time.Now().Add(time.Hour).UnixMilli(), 10)
+	c.send("SET", "foo", "bar", "PXAT", future)
+	c.expect("+OK\r\n")
+	c.send("GET", "foo")
+	c.expect("$3\r\nbar\r\n")
+}
+
+func TestSetKeepTTLRetainsTheExpiry(t *testing.T) {
+	c := dial(t, newTestServer(t))
+	c.send("SET", "foo", "bar", "PX", "100")
+	c.expect("+OK\r\n")
+	c.send("SET", "foo", "baz", "KEEPTTL")
+	c.expect("+OK\r\n")
+
+	c.send("GET", "foo")
+	c.expect("$3\r\nbaz\r\n")
+
+	time.Sleep(150 * time.Millisecond)
+	c.send("GET", "foo")
+	c.expect("$-1\r\n")
+}
+
+func TestSetWithoutExpiryClearsAnExistingOne(t *testing.T) {
+	c := dial(t, newTestServer(t))
+	c.send("SET", "foo", "bar", "PX", "50")
+	c.expect("+OK\r\n")
+	c.send("SET", "foo", "baz")
+	c.expect("+OK\r\n")
+
+	time.Sleep(100 * time.Millisecond)
+	c.send("GET", "foo")
+	c.expect("$3\r\nbaz\r\n")
+}
+
+func TestSetRejectsBadExpiryOptions(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"unknown option", []string{"SET", "k", "v", "NOPE"}, "-ERR syntax error\r\n"},
+		{"expiry without a value", []string{"SET", "k", "v", "PX"}, "-ERR syntax error\r\n"},
+		{"two expiry options", []string{"SET", "k", "v", "PX", "100", "EX", "10"}, "-ERR syntax error\r\n"},
+		{"expiry option after KEEPTTL", []string{"SET", "k", "v", "KEEPTTL", "PX", "100"}, "-ERR syntax error\r\n"},
+		{"non-numeric expiry", []string{"SET", "k", "v", "PX", "soon"}, "-ERR value is not an integer or out of range\r\n"},
+		{"zero expiry", []string{"SET", "k", "v", "EX", "0"}, "-ERR invalid expire time in 'set' command\r\n"},
+		{"negative expiry", []string{"SET", "k", "v", "PX", "-1"}, "-ERR invalid expire time in 'set' command\r\n"},
+		{"overflowing expiry", []string{"SET", "k", "v", "EX", "9223372036854775807"}, "-ERR invalid expire time in 'set' command\r\n"},
+	}
+	c := dial(t, newTestServer(t))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c.send(tt.args...)
+			c.expect(tt.want)
+		})
+	}
+
+	// A rejected SET must not have stored anything.
+	c.send("GET", "k")
+	c.expect("$-1\r\n")
 }
